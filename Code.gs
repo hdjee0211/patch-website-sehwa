@@ -14,6 +14,9 @@
  *   [{"name":"홍길동","phone":"01012345678","password":"..."}, {...}]
  */
 
+const VERSION = '2026-11-11 일정정리 v4';   // 배포 확인용
+const DEFAULT_MEMBER_ID = 'patchsw';          // 스크립트 속성 MEMBER_ID가 없을 때 사용
+const DEFAULT_MEMBER_PASSWORD = 'patchsw';    // 스크립트 속성 MEMBER_PASSWORD가 없을 때 사용
 const SHEET_NAME = '지원서';
 const HEADERS = ['ID', '제출일시', '이름', '학번', '전화번호', '희망 전공', '코딩 경험', '자기소개(지원 동기)', '하고 싶은 활동'];
 const BOARD_SHEET = '부원게시판';
@@ -27,7 +30,20 @@ const MEMBER_TTL_SEC = 60 * 60 * 6;  // 부원 로그인 유지 6시간 (최대�
 const MAX_FAILS = 10;                // 10분 동안 로그인 실패 허용 횟수
 
 function doGet() {
-  return json({ ok: true, message: '동아리 지원서 API가 정상 동작 중입니다.' });
+  // 브라우저로 이 웹 앱 주소를 열면 서버 상태를 보여줍니다. (비밀번호 값은 보여주지 않음)
+  const p = PropertiesService.getScriptProperties();
+  let adminOk = true;
+  try { getAdmins_(); } catch (e) { adminOk = false; }
+  return json({
+    ok: true,
+    message: '동아리 지원서 API가 정상 동작 중입니다.',
+    version: VERSION,
+    adminConfigured: adminOk,
+    memberIdSource: p.getProperty('MEMBER_ID') ? '스크립트 속성' : '기본값(patchsw)',
+    memberPasswordSource: p.getProperty('MEMBER_PASSWORD') ? '스크립트 속성' : '기본값(patchsw)',
+    memberIdLength: String(p.getProperty('MEMBER_ID') || DEFAULT_MEMBER_ID).trim().length,
+    memberPasswordLength: String(p.getProperty('MEMBER_PASSWORD') || DEFAULT_MEMBER_PASSWORD).trim().length,
+  });
 }
 
 function doPost(e) {
@@ -115,9 +131,9 @@ function login_(b) {
   const fails = checkFails_();
   const name = clean_(b.name, 30);
   const phone = digits_(b.phone);
-  const password = String(b.password || '');
+  const password = String(b.password || '').trim();
   const ok = getAdmins_().some(function (a) {
-    return a.name === name && digits_(a.phone) === phone && a.password === password;
+    return String(a.name || '').trim() === name && digits_(a.phone) === phone && String(a.password || '').trim() === password;
   });
   if (!ok) {
     addFail_(fails);
@@ -129,10 +145,10 @@ function login_(b) {
 function memberLogin_(b) {
   const fails = checkFails_();
   const p = PropertiesService.getScriptProperties();
-  const id = p.getProperty('MEMBER_ID');
-  const pw = p.getProperty('MEMBER_PASSWORD');
-  if (!id || !pw) throw new Error('서버에 부원 로그인 정보가 설정되지 않았습니다.');
-  if (clean_(b.id, 50) !== id || String(b.password || '') !== pw) {
+  // 속성 값 앞뒤 공백(복사·붙여넣기 실수)은 무시하고, 아이디는 대소문자를 구분하지 않습니다.
+  const id = String(p.getProperty('MEMBER_ID') || DEFAULT_MEMBER_ID).trim();
+  const pw = String(p.getProperty('MEMBER_PASSWORD') || DEFAULT_MEMBER_PASSWORD).trim();
+  if (clean_(b.id, 50).toLowerCase() !== id.toLowerCase() || String(b.password || '').trim() !== pw) {
     addFail_(fails);
     throw new Error('아이디 또는 비밀번호가 일치하지 않습니다.');
   }
@@ -199,11 +215,16 @@ function kindFromLabel_(v) {
 
 function boardList_(token) {
   requireRole_(token, ['admin', 'member']);
-  const values = getSheet_(BOARD_SHEET, BOARD_HEADERS).getDataRange().getValues();
+  const sh = getSheet_(BOARD_SHEET, BOARD_HEADERS);
+  const values = sh.getDataRange().getValues();
   const items = [];
-  values.slice(1).forEach(function (r) {
-    const kind = kindFromLabel_(r[1]);
-    if (!r[0] || !kind) return;
+  values.slice(1).forEach(function (r, i) {
+    if (!String(r[4] || '').trim()) return;                 // 제목 없는 줄은 건너뜀
+    const kind = kindFromLabel_(r[1]) || 'schedule';         // 종류가 비어 있으면 '일정'
+    if (!r[0]) {                                             // 시트에 직접 입력해 ID가 없는 줄 → ID 자동 부여
+      r[0] = Utilities.getUuid().slice(0, 8);
+      sh.getRange(i + 2, 1).setValue(r[0]);
+    }
     items.push({
       id: String(r[0]),
       kind: kind,
@@ -366,13 +387,25 @@ function getSheet_(name, headers) {
   }
   return sh;
 }
+// 시트에 직접 입력한 다양한 날짜 형식을 yyyy-MM-dd로 맞춥니다.
+// 예) 26.04.02 / 2026.4.2 / 2026. 4. 2 / 2026-04-02 / 2026/4/2 / 날짜 서식 셀
 function fmtDate_(v) {
   if (v instanceof Date) return Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd');
-  return String(v || '').trim();
+  const m = String(v || '').trim().match(/^(\d{2}|\d{4})\s*[.\-\/년]\s*(\d{1,2})\s*[.\-\/월]\s*(\d{1,2})/);
+  if (!m) return String(v || '').trim();
+  const y = m[1].length === 2 ? '20' + m[1] : m[1];
+  return y + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2);
 }
+// 예) 16:30 / 4:30 / 오후 4:30 / 시간 서식 셀
 function fmtTime_(v) {
   if (v instanceof Date) return Utilities.formatDate(v, Session.getScriptTimeZone(), 'HH:mm');
-  return String(v || '').trim();
+  const sv = String(v || '').trim();
+  const m = sv.match(/(\d{1,2})\s*:\s*(\d{2})/);
+  if (!m) return '';
+  let h = Number(m[1]);
+  if (/오후|PM/i.test(sv) && h < 12) h += 12;
+  if (/오전|AM/i.test(sv) && h === 12) h = 0;
+  return ('0' + h).slice(-2) + ':' + m[2];
 }
 function clean_(v, max) { return String(v == null ? '' : v).trim().slice(0, max); }
 function digits_(v) { return String(v == null ? '' : v).replace(/[^0-9]/g, ''); }
